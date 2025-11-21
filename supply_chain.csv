@@ -1,0 +1,4 @@
+BatchID,Product,Temperature,Status
+BATCH_001,Vaccines,2.5,OK
+BATCH_002,Insulin,4.1,WARNING
+BATCH_003,Antibiotics,3.0,OK

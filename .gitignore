@@ -1,0 +1,9 @@
+# Dependencies
+node_modules/
+
+# Security 
+.env
+
+# Local Configs 
+hedera_config.json
+auto_config.js

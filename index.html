@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustFlow | Hedera Forensic Audit</title>
+    <script src="auto_config.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/js-sha256/0.9.0/sha256.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;800&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #0f172a; overflow: hidden; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        
+        /* UI Effects */
+        .crt-scanline { background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0) 50%, rgba(0,0,0,0.2) 50%, rgba(0,0,0,0.2)); background-size: 100% 4px; pointer-events: none; }
+        .text-glow { text-shadow: 0 0 5px rgba(74, 222, 128, 0.3); }
+        #terminalContainer::-webkit-scrollbar { width: 6px; }
+        #terminalContainer::-webkit-scrollbar-track { background: #0c0c0c; }
+        #terminalContainer::-webkit-scrollbar-thumb { background: #333; }
+        .cursor-block { display: inline-block; width: 10px; height: 1.2em; background-color: #4ade80; animation: blink 1s step-end infinite; vertical-align: text-bottom; }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+        .flash-alarm { animation: flashRed 1s infinite; }
+        @keyframes flashRed { 0%, 100% { box-shadow: inset 0 0 0 0 rgba(220, 38, 38, 0); } 50% { box-shadow: inset 0 0 50px 20px rgba(220, 38, 38, 0.5); } }
+        #alarmOverlay { transition: opacity 0.5s ease-in-out; }
+        .fade-in { animation: fadeIn 0.5s ease-out forwards; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+        #hiddenInput { opacity: 0}
+    </style>
+</head>
+<body class="text-slate-300 h-screen flex flex-col">
+
+    <div id="alarmOverlay" class="fixed inset-0 z-50 pointer-events-none opacity-0 transition-opacity duration-300">
+        <div class="absolute inset-0 bg-red-900/20 flash-alarm"></div>
+        <div class="absolute top-28 left-1/2 -translate-x-1/2 bg-black border border-red-500 px-8 py-4 shadow-2xl shadow-red-500/50 flex items-center gap-4">
+            <i class="fa-solid fa-triangle-exclamation text-3xl text-red-500 animate-pulse"></i>
+            <div>
+                <h1 class="text-xl font-black text-white tracking-widest uppercase">Forensic Alert</h1>
+                <p class="font-mono text-red-400 text-xs">SMART CONTRACT REJECTED DATA</p>
+            </div>
+        </div>
+    </div>
+
+    <div id="reportModal" class="fixed inset-0 z-50 hidden flex items-center justify-center backdrop-blur-sm bg-black/80">
+        <div class="bg-[#0f172a] border border-red-500 shadow-2xl shadow-red-900/50 w-full max-w-5xl rounded-xl overflow-hidden flex flex-col max-h-[80vh]">
+            <div class="bg-red-900/20 p-4 border-b border-red-500/30 flex justify-between items-center">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 bg-red-600 text-white rounded flex items-center justify-center shadow-lg shadow-red-600/20"><i class="fa-solid fa-fingerprint text-xl"></i></div>
+                    <div><h2 class="text-white font-bold uppercase tracking-wider text-lg">Forensic Evidence Vault</h2><p class="text-[10px] text-red-300 font-mono uppercase">Chain of Custody: Broken</p></div>
+                </div>
+                <button onclick="closeReport()" class="text-slate-400 hover:text-white transition bg-slate-800 hover:bg-slate-700 w-8 h-8 rounded flex items-center justify-center"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="p-0 overflow-y-auto flex-1 bg-black/40">
+                <table class="w-full text-left border-collapse">
+                    <thead class="bg-red-950/30 text-xs text-red-400 font-mono uppercase sticky top-0 z-10 backdrop-blur-md">
+                        <tr><th class="p-4 border-b border-red-900/30 w-24">Time</th><th class="p-4 border-b border-red-900/30 w-32">Batch ID</th><th class="p-4 border-b border-red-900/30">Data Mutation</th><th class="p-4 border-b border-red-900/30">Cryptographic Mismatch</th></tr>
+                    </thead>
+                    <tbody id="reportTableBody" class="text-xs font-mono text-slate-300"></tbody>
+                </table>
+            </div>
+            <div class="p-4 bg-[#0a0f1d] border-t border-slate-800 flex justify-between items-center">
+                <span class="text-xs text-slate-500 font-mono flex items-center gap-2"><i class="fa-solid fa-lock"></i> <span id="reportCount">0 Records Secured</span></span>
+                <button onclick="downloadReport()" class="bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded text-xs font-bold uppercase tracking-wide transition flex items-center gap-2 shadow-lg shadow-red-600/20"><i class="fa-solid fa-download"></i> Download Evidence (.CSV)</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="bg-black border-b border-slate-800 px-6 py-2 flex items-center justify-between text-[10px] font-mono uppercase tracking-widest z-50">
+        <div class="flex gap-6">
+            <span class="text-slate-500">Network: <span class="text-green-400">Hedera Testnet</span></span>
+            <span class="text-slate-500">Service: <span class="text-blue-400">HCS (Consensus)</span></span>
+        </div>
+        <div class="flex gap-6">
+            <div class="flex items-center gap-2"><i class="fa-solid fa-file-code text-indigo-500"></i><span class="text-slate-500">Contract: <span class="text-white" id="displayContractId">Loading...</span></span></div>
+            <div class="flex items-center gap-2"><i class="fa-solid fa-coins text-yellow-500"></i><span class="text-slate-500">Token: <span class="text-white" id="displayTokenId">Loading...</span></span></div>
+        </div>
+    </div>
+
+    <nav class="h-16 border-b border-slate-800 bg-[#0B1120] flex items-center justify-between px-6 shrink-0 relative z-40">
+        <div class="flex items-center gap-3">
+            <div class="w-8 h-8 bg-blue-600 rounded flex items-center justify-center shadow-lg shadow-blue-500/30">
+                <i class="fa-solid fa-network-wired text-white text-sm"></i>
+            </div>
+            <div>
+                <span class="text-lg font-bold text-white tracking-tight">Hedera <span class="text-blue-500">TrustFlow</span></span>
+                <p class="text-[10px] text-slate-500 font-mono uppercase leading-none">Forensic Audit Suite</p>
+            </div>
+        </div>
+        
+        <div id="connectionPanel" class="flex items-center gap-2 transition-all duration-500">
+            <input type="text" id="topicIdInput" placeholder="Topic ID (0.0.xxxxx)" class="bg-slate-900 border border-slate-700 rounded px-3 py-2 text-xs font-mono w-40 focus:border-blue-500 outline-none text-white placeholder-slate-600 transition-colors">
+            <button onclick="manualConnect()" class="bg-blue-600 hover:bg-blue-500 text-white px-5 py-2 rounded text-xs font-bold transition shadow-lg shadow-blue-900/20 uppercase tracking-wide">Connect</button>
+        </div>
+
+        <div id="liveRewardsPanel" class="hidden flex items-center gap-8 border-l border-slate-800 pl-8 fade-in">
+            <div class="flex flex-col items-end">
+                <span class="text-[10px] text-slate-500 uppercase tracking-wider font-bold">Total Rewards Earned</span>
+                <span class="text-yellow-400 font-bold font-mono text-xl flex items-center gap-2">
+                    <i class="fa-solid fa-coins text-sm"></i> <span id="navTokenCount">0</span> <span class="text-xs text-yellow-600">TRUST</span>
+                </span>
+            </div>
+            <div class="flex items-center gap-3">
+                <div class="relative">
+                    <div class="w-3 h-3 bg-green-500 rounded-full animate-ping absolute opacity-75"></div>
+                    <div class="w-3 h-3 bg-green-500 rounded-full relative shadow-[0_0_10px_rgba(34,197,94,0.8)]"></div>
+                </div>
+                <div class="flex flex-col">
+                    <span class="text-[10px] text-slate-500 uppercase tracking-wider font-bold">Smart Contract</span>
+                    <span class="text-green-400 font-bold font-mono text-xs tracking-widest">LIVE EXECUTION</span>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="flex-1 grid grid-cols-1 lg:grid-cols-12 overflow-hidden">
+        <div class="lg:col-span-4 bg-[#0c0c0c] border-r border-slate-800 flex flex-col font-mono text-xs relative shadow-2xl z-10 h-full overflow-hidden">
+            <div class="absolute inset-0 crt-scanline pointer-events-none z-20 opacity-20"></div>
+            <div class="bg-[#1a1a1a] p-2 border-b border-[#333] flex justify-between items-center px-4 select-none shrink-0 z-30">
+                <span class="text-slate-400 font-bold">admin@node-01:~</span>
+                <div class="flex gap-1.5"><div class="w-2.5 h-2.5 rounded-full bg-slate-600"></div><div class="w-2.5 h-2.5 rounded-full bg-slate-600"></div></div>
+            </div>
+            <div id="terminalContainer" class="flex-1 p-4 text-slate-300 text-glow relative z-10" onclick="focusTerminal()">
+                <div id="terminalHistory" class="space-y-1 mb-1 break-all whitespace-pre-wrap"></div>
+                <div id="inputLine" class="flex flex-wrap items-center hidden">
+                    <span class="text-green-500 font-bold mr-2">$</span><span id="mirrorText" class="text-white break-all"></span><span class="cursor-block"></span>
+                </div>
+                <input id="hiddenInput" type="text" autocomplete="off" oninput="updateMirror()" onkeydown="handleKey(event)">
+            </div>
+        </div>
+
+        <div class="lg:col-span-8 bg-[#0f172a] flex flex-col p-6 space-y-6 relative overflow-y-auto h-full">
+            <div class="grid grid-cols-2 gap-4 h-36 shrink-0">
+                <div class="bg-slate-800/40 rounded-xl border border-slate-700 p-4 flex items-center gap-6">
+                    <div class="h-28 w-28 relative"><canvas id="pieChart"></canvas></div>
+                    <div class="flex flex-col justify-center"><h3 class="text-xs font-bold text-slate-400 uppercase tracking-wide">Compliance Rate</h3><div class="text-3xl font-bold text-white mt-1" id="compliancePercent">--%</div><p class="text-[10px] text-slate-500 mt-1">Batches within safe temperature</p></div>
+                </div>
+                <button id="integrityCard" onclick="openTamperReport()" disabled class="bg-slate-800/40 rounded-xl border border-slate-700 p-4 flex flex-col justify-center relative overflow-hidden transition-all duration-300 text-left group hover:bg-slate-800/60">
+                    <div class="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity"><i class="fa-solid fa-magnifying-glass-chart text-6xl text-slate-500" id="integrityIcon"></i></div>
+                    <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wide">Integrity Audit</h3>
+                    <div class="flex items-baseline gap-2 mt-2"><span class="text-4xl font-black text-white" id="tamperCountDisplay">0</span><span class="text-xs text-slate-500 font-bold uppercase bg-slate-700/50 px-2 py-1 rounded" id="tamperLabel">Secure</span></div>
+                    <div id="auditAction" class="hidden mt-3 flex items-center gap-2 text-[10px] text-red-400 font-bold animate-pulse"><i class="fa-solid fa-folder-open"></i> CLICK TO VIEW FORENSIC LOG</div>
+                </button>
+            </div>
+            <div class="flex-1 bg-slate-800/40 rounded-xl border border-slate-700 overflow-hidden flex flex-col min-h-[300px]">
+                <div class="p-3 bg-slate-900/50 border-b border-slate-700 flex justify-between items-center shrink-0">
+                    <h3 class="text-xs font-bold text-slate-300 uppercase flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span> Live Sensor Stream</h3>
+                    <div class="flex gap-2 text-[10px] font-bold"><span class="text-cyan-400 bg-cyan-900/20 px-2 py-1 rounded border border-cyan-500/20">❄️ COLD</span><span class="text-green-400 bg-green-900/20 px-2 py-1 rounded border border-green-500/20">✅ OK</span><span class="text-orange-400 bg-orange-900/20 px-2 py-1 rounded border border-orange-500/20">🔥 HOT</span></div>
+                </div>
+                <div class="overflow-y-auto flex-1 p-0 relative">
+                    <table class="w-full text-left border-collapse">
+                        <thead class="bg-slate-900 text-xs text-slate-500 font-mono uppercase sticky top-0 z-20 shadow-lg">
+                            <tr><th class="p-3 w-[15%] border-r border-slate-700/50">Batch ID</th><th class="p-3 w-[15%] border-r border-slate-700/50">Temp</th><th class="p-3 w-[20%] border-r border-slate-700/50">Quality</th><th class="p-3 w-[25%] border-r border-slate-700/50">Ledger Audit</th><th class="p-3 w-[25%] text-right">Smart Contract Action</th></tr>
+                        </thead>
+                        <tbody id="batchTable" class="text-sm font-mono"></tbody>
+                    </table>
+                    <div id="emptyState" class="absolute inset-0 flex flex-col items-center justify-center text-slate-600 pointer-events-none"><i class="fa-solid fa-satellite-dish text-4xl mb-4 opacity-20"></i><p class="text-xs font-mono">Waiting for Producer Stream...</p></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- AUTO CONFIG LOADER ---
+        function loadAutoConfig() {
+            if (window.HEDERA_CONFIG) {
+                const cid = window.HEDERA_CONFIG.contractId || "0.0.xxxxx";
+                const tid = window.HEDERA_CONFIG.tokenId || "0.0.xxxxx";
+                document.getElementById('displayContractId').innerText = cid;
+                document.getElementById('displayTokenId').innerText = tid;
+                
+                if(window.HEDERA_CONFIG.topicId) {
+                    console.log("✅ Auto-connecting to:", window.HEDERA_CONFIG.topicId);
+                    document.getElementById('topicIdInput').value = window.HEDERA_CONFIG.topicId;
+                    setTimeout(() => { startSystem(); }, 1500);
+                }
+            }
+        }
+
+        // --- STATE ---
+        let localBatchData = []; let permanentEvidence = []; let intervalId = null; let isBooting = true; let alarmTimeout;
+        let stats = { executions: 0, tokens: 0 };
+        const hiddenInput = document.getElementById('hiddenInput');
+        const mirrorText = document.getElementById('mirrorText');
+        const historyDiv = document.getElementById('terminalHistory');
+        const container = document.getElementById('terminalContainer');
+        const inputLine = document.getElementById('inputLine');
+
+        function triggerAlarm() {
+            const overlay = document.getElementById('alarmOverlay');
+            overlay.classList.remove('opacity-0');
+            if(alarmTimeout) clearTimeout(alarmTimeout);
+            alarmTimeout = setTimeout(() => overlay.classList.add('opacity-0'), 3000);
+        }
+
+        function triggerSlashEffect() {
+            const tokenDisplay = document.getElementById('navTokenCount');
+            const container = tokenDisplay.parentElement;
+            container.classList.add('text-red-500', 'animate-pulse');
+            tokenDisplay.innerText = `${stats.tokens} (-50 SLASHED)`;
+            setTimeout(() => {
+                container.classList.remove('text-red-500', 'animate-pulse');
+                refreshStatsUI();
+            }, 2000);
+        }
+
+        const bootLines = [
+            { text: "Booting TrustFlow Audit Engine...", delay: 100 },
+            { text: "Verifying Hedera Ledger Link...", delay: 200 },
+            { text: "Initializing Smart Contract ABI...", delay: 150 },
+            { text: "Loading Forensic Modules...", delay: 200 },
+            { text: "System Active.", delay: 100, color: "text-green-400" },
+            { text: "Type 'help' for commands.", delay: 50, color: "text-blue-400" },
+        ];
+
+        async function runBootSequence() {
+            loadAutoConfig();
+            for (const line of bootLines) {
+                await new Promise(r => setTimeout(r, line.delay));
+                addToHistory(line.text, line.color || "text-slate-500");
+            }
+            isBooting = false;
+            inputLine.classList.remove('hidden');
+            focusTerminal();
+        }
+
+        function focusTerminal() { if(!isBooting) hiddenInput.focus(); }
+        function updateMirror() { mirrorText.innerText = hiddenInput.value; scrollToBottom(); }
+        function scrollToBottom() { container.scrollTop = container.scrollHeight; }
+        function handleKey(e) {
+            if (isBooting) return;
+            if (e.key === 'Enter') {
+                const cmd = hiddenInput.value.trim();
+                addToHistory(`$ ${hiddenInput.value}`, "text-white font-bold");
+                hiddenInput.value = ""; mirrorText.innerText = "";
+                if (cmd) executeCommand(cmd);
+                setTimeout(scrollToBottom, 10);
+            }
+        }
+        function addToHistory(text, classes = "text-slate-300") {
+            const div = document.createElement('div'); div.className = classes; div.innerText = text;
+            historyDiv.appendChild(div); scrollToBottom();
+        }
+        function log(msg, color = "text-slate-300") { addToHistory(msg, color); }
+
+        function executeCommand(cmd) {
+            const parts = cmd.split(' '); const action = parts[0].toLowerCase();
+            if (action === 'fix') {
+                const badBatch = localBatchData.find(b => b.temp < 4 || b.temp >= 5);
+                if (badBatch) {
+                    log(`> Targeting Batch ${badBatch.id}...`, "text-yellow-500");
+                    log(`> Patching value to 4.0°C...`, "text-slate-400");
+                    setTimeout(() => {
+                        const originalTemp = badBatch.temp;
+                        badBatch.temp = "4.0"; badBatch.isTampered = true;
+                        const fakeHash = sha256(JSON.stringify({ id: badBatch.id, temp: "4.0", status: "ACTIVE" }));
+                        permanentEvidence.unshift({ ...badBatch, originalTemp: originalTemp, fakeHash: fakeHash, timestamp: new Date() });
+                        
+                        stats.tokens -= 50; if(stats.tokens < 0) stats.tokens = 0;
+                        triggerSlashEffect();
+                        triggerAlarm(); refreshDashboard();
+                        log(`> Patch Applied.`, "text-green-400");
+                        log(`! CRITICAL: HASH MISMATCH. 50 TRUST SLASHED.`, "text-red-500 font-bold");
+                    }, 600);
+                } else { log("> No bad batches found.", "text-slate-500"); }
+            } else if (action === 'connect') {
+                 if(parts[1]) { document.getElementById('topicIdInput').value = parts[1]; startSystem(); } else { log("Usage: connect [TopicID]", "text-red-400"); }
+            } else if (action === 'help') log("COMMANDS: fix, connect [ID]");
+            else log(`Unknown command`, "text-red-500");
+        }
+
+        function refreshStatsUI() {
+            document.getElementById('navTokenCount').innerText = stats.tokens;
+        }
+
+        function openTamperReport() {
+            if (permanentEvidence.length === 0) return;
+            document.getElementById('reportModal').classList.remove('hidden');
+            const tbody = document.getElementById('reportTableBody');
+            document.getElementById('reportCount').innerText = `${permanentEvidence.length} Records Secured`;
+            tbody.innerHTML = "";
+            permanentEvidence.forEach(b => {
+                const row = document.createElement('tr'); row.className = "border-b border-red-900/20 hover:bg-red-900/10 transition";
+                row.innerHTML = `<td class="p-4 text-slate-500 align-top">${b.timestamp.toLocaleTimeString()}</td><td class="p-4 text-white font-bold align-top">${b.id}</td><td class="p-4 align-top"><div class="flex items-center gap-2 text-xs"><span class="text-cyan-400 line-through opacity-70">${b.originalTemp}°C</span><i class="fa-solid fa-arrow-right text-slate-500"></i><span class="text-red-500 font-bold text-base">${b.temp}°C</span></div><div class="text-[10px] text-slate-500 mt-1">Manual Override Detected</div></td><td class="p-4 align-top font-mono text-[10px]"><div class="mb-1"><span class="text-green-600 font-bold">LEDGER:</span> <span class="text-slate-400">${b.originalHash.substring(0, 20)}...</span></div><div><span class="text-red-500 font-bold">LOCAL:&nbsp;&nbsp;</span> <span class="text-slate-300">${b.fakeHash.substring(0, 20)}...</span></div></td>`;
+                tbody.appendChild(row);
+            });
+        }
+        function closeReport() { document.getElementById('reportModal').classList.add('hidden'); }
+        function downloadReport() {
+            // 1. Check if there is evidence
+            if (permanentEvidence.length === 0) {
+                log("! Error: No evidence to export yet.", "text-red-500");
+                return;
+            }
+
+            // 2. Build CSV Content
+            let csv = "Timestamp,Batch ID,Original Temp,Falsified Temp,Ledger Hash,Falsified Hash\n";
+            permanentEvidence.forEach(b => {
+                // Handle missing fields gracefully
+                const time = b.timestamp ? b.timestamp.toISOString() : new Date().toISOString();
+                const oTemp = b.originalTemp || "N/A";
+                const fTemp = b.temp || "N/A";
+                const oHash = b.originalHash || "N/A";
+                const fHash = b.fakeHash || "N/A";
+                
+                csv += `${time},${b.id},${oTemp},${fTemp},${oHash},${fHash}\n`;
+            });
+            
+            // 3. Create Blob
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url = window.URL.createObjectURL(blob);
+            
+            // 4. Create Link & Append to DOM (THE FIX)
+            const link = document.createElement("a");
+            link.setAttribute("href", url);
+            link.setAttribute("download", "forensic_evidence_log.csv");
+            link.style.visibility = 'hidden';
+            
+            document.body.appendChild(link); // <--- Crucial Step
+            link.click();
+            document.body.removeChild(link); // <--- Cleanup
+            
+            log("> Exported forensic_evidence_log.csv", "text-green-500");
+        }
+
+        const pieCtx = document.getElementById('pieChart').getContext('2d');
+        const pieChart = new Chart(pieCtx, { type: 'doughnut', data: { labels: ['Compliant', 'Critical'], datasets: [{ data: [100, 0], backgroundColor: ['#4ade80', '#f59e0b'], borderWidth: 0, cutout: '70%' }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } } });
+
+        function manualConnect() { startSystem(); }
+
+        function startSystem() {
+            const topicId = document.getElementById('topicIdInput').value.trim();
+            if(!topicId) { log("Error: No Topic ID found.", "text-red-500"); return; }
+            document.getElementById('connectionPanel').classList.add('hidden');
+            document.getElementById('liveRewardsPanel').classList.remove('hidden');
+            document.getElementById('emptyState').style.display = 'none';
+            log(`Link Established: Topic ${topicId}`, "text-blue-400");
+            const url = `https://testnet.mirrornode.hedera.com/api/v1/topics/${topicId}/messages?limit=20&order=desc`;
+            if(intervalId) clearInterval(intervalId);
+            intervalId = setInterval(async () => { try { const res = await fetch(url); const data = await res.json(); if(data.messages) ingestData(data.messages); } catch(e) {} }, 3000);
+        }
+
+        function ingestData(messages) {
+            let newData = false;
+            messages.reverse().forEach(msg => {
+                const seq = msg.sequence_number;
+                if (!localBatchData.find(b => b.seq === seq)) {
+                    try {
+                        const decoded = atob(msg.message); const parts = decoded.split('||'); const dataObj = JSON.parse(parts[0]);
+                        const isGood = parseFloat(dataObj.temp) >= 4.0 && parseFloat(dataObj.temp) < 5.0;
+                        if(isGood) { stats.tokens += 10; stats.executions++; }
+                        localBatchData.unshift({ seq: seq, id: dataObj.id, temp: dataObj.temp, originalHash: parts[1], isTampered: false, isRewarded: isGood });
+                        newData = true;
+                    } catch(e) {}
+                }
+            });
+            if(localBatchData.length > 15) localBatchData.pop();
+            if(newData) refreshDashboard();
+        }
+
+        function refreshDashboard() {
+            const tbody = document.getElementById('batchTable'); tbody.innerHTML = ""; let okCount = 0;
+            refreshStatsUI();
+            localBatchData.forEach(batch => {
+                const t = parseFloat(batch.temp); let tempClass = "text-slate-400";
+                if(t <= 3) tempClass = "text-cyan-400 font-bold"; else if(t >= 5) tempClass = "text-orange-400 font-bold"; else { tempClass = "text-green-400 font-bold"; okCount++; }
+                const row = document.createElement('tr');
+                row.className = batch.isTampered ? "bg-red-900/30 border-b border-red-600 border-l-4 border-l-red-500 transition-all" : "border-b border-slate-700/50 hover:bg-slate-800/30 transition-all";
+                let contractStatus = batch.isTampered ? `<div class="flex flex-col items-end"><span class="text-[10px] text-red-500 font-bold uppercase">⛔ REVERTED</span><span class="text-[9px] text-slate-500 font-mono">Hash Check Failed</span></div>` : (batch.isRewarded ? `<div class="flex flex-col items-end"><span class="text-[10px] text-yellow-500 font-bold uppercase"><i class="fa-solid fa-check"></i> MINT 10 TRUST</span><span class="text-[9px] text-slate-500 font-mono">via 0x167 (HTS)</span></div>` : `<div class="flex flex-col items-end opacity-50"><span class="text-[10px] text-slate-400 uppercase">Skipped</span><span class="text-[9px] text-slate-600 font-mono">Conditions not met</span></div>`);
+                row.innerHTML = `<td class="p-3 border-r border-slate-700/50 font-mono text-slate-300">${batch.id}</td><td class="p-3 border-r border-slate-700/50 font-mono ${tempClass}">${batch.temp}°C</td><td class="p-3 border-r border-slate-700/50 text-right">${batch.isTampered ? `<span class="text-red-500 font-bold text-[10px] animate-pulse">⚠️ HASH MISMATCH</span>` : `<span class="text-green-500/50 font-bold text-[10px]"><i class="fa-solid fa-check"></i> VALID</span>`}</td><td class="p-3 text-right">${contractStatus}</td>`;
+                tbody.appendChild(row);
+            });
+            const tamperCount = permanentEvidence.length;
+            document.getElementById('tamperCountDisplay').innerText = tamperCount;
+            const card = document.getElementById('integrityCard');
+            if (tamperCount > 0) {
+                card.disabled = false; card.classList.add('bg-red-900/10', 'border-red-500'); card.classList.remove('bg-slate-800/40', 'border-slate-700');
+                document.getElementById('tamperLabel').innerText = "BREACH"; document.getElementById('tamperLabel').classList.add('bg-red-500', 'text-black');
+                document.getElementById('integrityIcon').classList.add('text-red-500'); document.getElementById('auditAction').classList.remove('hidden');
+            }
+            const okPercent = Math.round((okCount / (localBatchData.length || 1)) * 100);
+            document.getElementById('compliancePercent').innerText = okPercent + "%";
+            pieChart.data.datasets[0].data = [okCount, (localBatchData.length || 1) - okCount]; pieChart.update();
+        }
+
+        window.onload = runBootSequence;
+    </script>
+</body>
+</html>
